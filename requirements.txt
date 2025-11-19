@@ -1,0 +1,12 @@
+numpy
+pandas
+torch
+transformers
+dataset
+pyarrow
+sacrebleu
+rouge_score
+nltk
+bert-score
+seaborn
+matplotlib
