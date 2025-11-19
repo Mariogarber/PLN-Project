@@ -5,18 +5,15 @@ import torch
 from model.dataset.Datasets import ToxicNonToxicDataset
 
 import pandas as pd
-from transformers import AutoTokenizer, AutoModelForMaskedLM
 from bert_score import score as bertscore
 import sacrebleu
 from rouge_score import rouge_scorer
+from transformers import T5Tokenizer, T5ForConditionalGeneration
 
-SYSTEM_PROMPT = """Eres un modelo de lenguaje avanzado entrenado para detoxificar texto.
-Tu tarea es transformar oraciones tóxicas en versiones neutrales, manteniendo el significado original
-tanto como sea posible. Evita cualquier lenguaje ofensivo o inapropiado en tus respuestas. Detoxifica este texto:
-"""
+SYSTEM_PROMPT = "Toxic sentence on language {lang}: {toxic_text}. Detoxified sentence:"
 
-TOKENIZER = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-MODEL = AutoModelForMaskedLM.from_pretrained("FacebookAI/xlm-roberta-base")
+TOKENIZER = T5Tokenizer.from_pretrained("google/mt5-base")
+MODEL = T5ForConditionalGeneration.from_pretrained("google/mt5-base")
 
 LOGGER = logging.getLogger("baseline_logger")
 
@@ -37,29 +34,31 @@ if __name__ == "__main__":
     #store the logs in a file
     dataset = load_data()
     result_df = pd.DataFrame(columns=['toxic_text', 'detoxified_text', 'non_toxic_text', 'rouge1', 'rougeL', 'bleu', 'bertscore_precision', 'bertscore_recall', 'bertscore_f1'])
-    for toxic_text, non_toxic_text, lang in dataset:
-        prompt = SYSTEM_PROMPT + toxic_text
+    for toxic_text, non_toxic_text, lang in dataset.data.itertuples(index=False):
+        print(f"Toxic: {toxic_text}\nNon-Toxic: {non_toxic_text}\nLanguage: {lang}")
+        prompt = SYSTEM_PROMPT.format(toxic_text=toxic_text, lang=lang)
         inputs = TOKENIZER(prompt, return_tensors="pt")
         with torch.no_grad():
-            outputs = MODEL(**inputs)
-        LOGGER.info(f"Toxic: {toxic_text}\nDetoxified: {outputs}\nCorrect Non-Toxic: {non_toxic_text}\n")
+            outputs = MODEL.generate(**inputs)
+            detoxified_text = TOKENIZER.decode(outputs[0], skip_special_tokens=True)
+        LOGGER.info(f"Toxic: {toxic_text}\nDetoxified: {detoxified_text}\nCorrect Non-Toxic: {non_toxic_text}\n")
 
-        # ROUGE Evaluation 
+        # ROUGE Evaluation
         scorer = rouge_scorer.RougeScorer(['rouge1', 'rougeL'], use_stemmer=True)
-        rouge_scores = scorer.score(non_toxic_text, str(outputs))
+        rouge_scores = scorer.score(non_toxic_text, detoxified_text)
         LOGGER.info(f"ROUGE Scores: {rouge_scores}")
 
         # BLEU Evaluation
-        bleu = sacrebleu.corpus_bleu([str(outputs)], [[non_toxic_text]])
+        bleu = sacrebleu.corpus_bleu([detoxified_text], [[non_toxic_text]])
         LOGGER.info(f"BLEU Score: {bleu.score}")
 
         # BERTScore Evaluation
-        P, R, F1 = bertscore([str(outputs)], [non_toxic_text], lang=lang, rescale_with_baseline=True)
+        P, R, F1 = bertscore([detoxified_text], [non_toxic_text], lang=lang, rescale_with_baseline=True)
         LOGGER.info(f"BERTScore - Precision: {P}, Recall: {R}, F1: {F1}")
 
         new_row = pd.DataFrame([{
             'toxic_text': toxic_text,
-            'detoxified_text': str(outputs),
+            'detoxified_text': detoxified_text,
             'non_toxic_text': non_toxic_text,
             'rouge1': rouge_scores['rouge1'].fmeasure,
             'rougeL': rouge_scores['rougeL'].fmeasure,
@@ -69,7 +68,7 @@ if __name__ == "__main__":
             'bertscore_f1': F1.item()
         }])
         result_df = pd.concat([result_df, new_row], ignore_index=True)
-        
-    
+
+
     result_df.to_csv('baseline_evaluation_results.csv', index=False)
     LOGGER.info("Evaluation results saved to baseline_evaluation_results.csv")
