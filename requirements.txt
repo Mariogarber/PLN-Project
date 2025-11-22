@@ -10,3 +10,7 @@ nltk
 bert-score
 seaborn
 matplotlib
+sentencepiece
+peft
+accelerate
+bitsandbytes
