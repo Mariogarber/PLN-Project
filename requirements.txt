@@ -2,7 +2,7 @@ numpy
 pandas
 torch
 transformers
-dataset
+datasets
 pyarrow
 sacrebleu
 rouge_score
@@ -14,3 +14,5 @@ sentencepiece
 peft
 accelerate
 bitsandbytes
+sentence-transformers
+scikit-learn
