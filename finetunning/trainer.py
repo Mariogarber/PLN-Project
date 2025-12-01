@@ -104,16 +104,22 @@ def build_trainer(trainer_name,
             callbacks = callbacks
         )
     elif trainer_name == "toxic_mask_v1":
-        from .utils import ToxicTokenMaskGenerator
+        # Word-level masking approach
+        forbidden_words = kwargs.get("forbidden_words")
+        if not forbidden_words:
+            raise ValueError("forbidden_words must be provided for toxic_mask_v1 trainer")
+        
         trainer = ToxicMaskTrainer_V1(
             model=model,
             args=args,
             train_dataset=dataset_dict["train"],
             eval_dataset=dataset_dict.get("validation", None),
             data_collator=data_collator,
-            forbidden_token_ids=forbidden_token_ids,
+            forbidden_words=forbidden_words,
             mask_strategy=kwargs.get("mask_strategy", "toxic_only"),
             context_window=kwargs.get("context_window", 2),
+            case_sensitive=kwargs.get("case_sensitive", False),
+            match_partial=kwargs.get("match_partial", True),
             callbacks=callbacks,
             tokenizer=TOKENIZER
         )
@@ -132,25 +138,33 @@ class ToxicMaskTrainer_V1(Trainer):
     
     def __init__(
         self, 
-        forbidden_token_ids: List[int],
+        forbidden_words: List[str],
         mask_strategy: str = "toxic_only",
         context_window: int = 2,
+        case_sensitive: bool = False,
+        match_partial: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
         
-        self.forbidden_token_ids = set(forbidden_token_ids) if forbidden_token_ids else set()
         self.mask_strategy = mask_strategy
         self.context_window = context_window
+        self.forbidden_words = forbidden_words
         
-        # Import here to avoid circular imports
-        from .utils import ToxicTokenMaskGenerator
+        # Use word-level masking
+        from .utils import ToxicMaskGenerator
         
-        self.mask_generator = ToxicTokenMaskGenerator(
+        self.mask_generator = ToxicMaskGenerator(
             tokenizer=self.tokenizer,
-            forbidden_token_ids=forbidden_token_ids,
-            mask_strategy=mask_strategy
+            forbidden_words=forbidden_words,
+            mask_strategy=mask_strategy,
+            case_sensitive=case_sensitive,
+            match_partial=match_partial
         )
+        
+        self.logger = logging.getLogger("ToxicMaskTrainer")
+        self.logger.info(f"🎭 ToxicMaskTrainer initialized")
+        self.logger.info(f"🚫 Tracking {len(forbidden_words)} forbidden words")
         
         self.logger = logging.getLogger("ToxicMaskTrainer")
         self.logger.info(f"🎭 ToxicMaskTrainer initialized")
@@ -230,7 +244,8 @@ class ToxicMaskTrainer_V1(Trainer):
             'average_toxic_ratio_percent': avg_toxic_ratio,
             'mask_strategy': self.mask_strategy,
             'context_window': self.context_window,
-            'forbidden_token_count': len(self.forbidden_token_ids)
+            'masking_approach': 'word-level',
+            'forbidden_word_count': len(self.forbidden_words)
         }
 
     def validate_dataset_toxicity(self, dataset, max_samples: int = 100) -> dict:
