@@ -8,6 +8,15 @@ import warnings
 warnings.filterwarnings('ignore')
 from utils import detoxify_text
 import pandas as pd
+import torch
+from typing import List, Dict, Union, Optional
+from transformers import AutoTokenizer
+from datasets import Dataset
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class DetoxificationEvaluator:
     def __init__(self, bert_model='all-MiniLM-L6-v2'):
@@ -169,3 +178,338 @@ class DetoxificationEvaluator:
         print(f"  Semantic:        {metrics['input_output_semantic_similarity']:.4f}")
         print(f"  Average:         {metrics['input_output_avg_similarity']:.4f}")
         print("=" * 60)
+
+
+class DetoxificationInference:
+    """
+    🔬 Comprehensive inference class for detoxification models
+    
+    This class handles inference on test datasets with proper preprocessing,
+    batch processing, and comprehensive result analysis.
+    """
+    
+    def __init__(
+        self, 
+        model, 
+        tokenizer: AutoTokenizer,
+        prefix: str = "detoxify and rewrite: ",
+        device: str = "auto",
+        max_length: int = 512,
+        max_new_tokens: int = 128
+    ):
+        """
+        Initialize the inference handler
+        
+        Args:
+            model: The fine-tuned model for inference
+            tokenizer: Tokenizer for text processing
+            prefix: Task prefix to add to input sentences
+            device: Device to run inference on ("auto", "cuda", "cpu")
+            max_length: Maximum input sequence length
+            max_new_tokens: Maximum new tokens to generate
+        """
+        self.model = model
+        self.tokenizer = tokenizer
+        self.prefix = prefix
+        self.max_length = max_length
+        self.max_new_tokens = max_new_tokens
+        
+        # Set device
+        if device == "auto":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+        
+        logger.info(f"🎯 DetoxificationInference initialized")
+        logger.info(f"📋 Prefix: '{self.prefix}'")
+        logger.info(f"💻 Device: {self.device}")
+        logger.info(f"📏 Max length: {self.max_length}")
+        logger.info(f"🔢 Max new tokens: {self.max_new_tokens}")
+    
+    def preprocess_input(self, text: str) -> str:
+        """
+        Preprocess input text by adding task prefix
+        
+        Args:
+            text: Raw input text
+            
+        Returns:
+            Preprocessed text with prefix
+        """
+        if not text.startswith(self.prefix):
+            return self.prefix + text
+        return text
+    
+    def preprocess_dataset(self, dataset: Union[Dataset, List[Dict], pd.DataFrame]) -> List[Dict]:
+        """
+        Preprocess dataset for inference
+        
+        Args:
+            dataset: Test dataset (HuggingFace Dataset, list of dicts, or DataFrame)
+            
+        Returns:
+            List of preprocessed samples
+        """
+        processed_samples = []
+        
+        # Handle different input types
+        if isinstance(dataset, pd.DataFrame):
+            dataset_items = dataset.to_dict('records')
+        elif hasattr(dataset, '__iter__') and not isinstance(dataset, str):
+            # Handle HuggingFace Dataset or list
+            dataset_items = list(dataset)
+        else:
+            raise ValueError(f"Unsupported dataset type: {type(dataset)}")
+        
+        for item in dataset_items:
+            # Handle different field names
+            toxic_text = (
+                item.get('toxic_sentence') or 
+                item.get('toxic_text') or 
+                item.get('input') or 
+                item.get('text', '')
+            )
+            
+            neutral_text = (
+                item.get('neutral_sentence') or 
+                item.get('neutral_text') or 
+                item.get('target') or 
+                item.get('reference', '')
+            )
+            
+            language = item.get('language', 'unknown')
+            
+            # Preprocess the toxic text
+            preprocessed_input = self.preprocess_input(toxic_text)
+            
+            processed_samples.append({
+                'original_toxic': toxic_text,
+                'preprocessed_input': preprocessed_input,
+                'reference_neutral': neutral_text,
+                'language': language,
+                'sample_id': len(processed_samples)
+            })
+        
+        logger.info(f"📊 Preprocessed {len(processed_samples)} samples")
+        return processed_samples
+    
+    def generate_single(self, input_text: str) -> Dict[str, str]:
+        """
+        Generate detoxified text for a single input
+        
+        Args:
+            input_text: Preprocessed input text
+            
+        Returns:
+            Dictionary with generation results
+        """
+        try:
+            # Tokenize input
+            inputs = self.tokenizer(
+                input_text,
+                return_tensors="pt",
+                max_length=self.max_length,
+                truncation=True,
+                padding=True
+            ).to(self.device)
+            
+            # Generate with the model
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    num_beams=1  # Greedy for consistency
+                )
+            
+            # Decode the output
+            generated_text = self.tokenizer.decode(
+                outputs[0], 
+                skip_special_tokens=True
+            )
+            
+            # Remove the input prefix from generated text if present
+            if generated_text.startswith(input_text):
+                generated_text = generated_text[len(input_text):].strip()
+            elif generated_text.startswith(self.prefix):
+                # Remove prefix if model included it in output
+                generated_text = generated_text[len(self.prefix):].strip()
+            
+            return {
+                'success': True,
+                'generated_text': generated_text,
+                'error': None
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Generation failed: {e}")
+            return {
+                'success': False,
+                'generated_text': f"[Generation Error: {str(e)}]",
+                'error': str(e)
+            }
+    
+    def run_inference(
+        self, 
+        dataset: Union[Dataset, List[Dict], pd.DataFrame],
+        batch_size: int = 8,
+        show_progress: bool = True
+    ) -> List[Dict]:
+        """
+        Run inference on entire dataset
+        
+        Args:
+            dataset: Test dataset
+            batch_size: Batch size for processing (currently processes one by one)
+            show_progress: Whether to show progress
+            
+        Returns:
+            List of inference results
+        """
+        logger.info("🚀 Starting inference process...")
+        
+        # Preprocess dataset
+        processed_samples = self.preprocess_dataset(dataset)
+        
+        results = []
+        total_samples = len(processed_samples)
+        
+        for i, sample in enumerate(processed_samples):
+            if show_progress and (i % 10 == 0 or i == total_samples - 1):
+                print(f"🔬 Processing sample {i+1}/{total_samples} ({((i+1)/total_samples)*100:.1f}%)")
+            
+            # Generate detoxified text
+            generation_result = self.generate_single(sample['preprocessed_input'])
+            
+            # Combine all information
+            result = {
+                **sample,  # Include all original sample data
+                **generation_result,  # Include generation results
+                'input_length': len(sample['preprocessed_input']),
+                'output_length': len(generation_result['generated_text']) if generation_result['success'] else 0
+            }
+            
+            results.append(result)
+        
+        logger.info(f"✅ Inference completed on {total_samples} samples")
+        
+        # Summary statistics
+        successful_generations = sum(1 for r in results if r['success'])
+        failure_rate = (total_samples - successful_generations) / total_samples * 100
+        
+        logger.info(f"📊 Success rate: {successful_generations}/{total_samples} ({100-failure_rate:.1f}%)")
+        if failure_rate > 0:
+            logger.warning(f"⚠️ Failure rate: {failure_rate:.1f}%")
+        
+        return results
+    
+    def analyze_results(self, results: List[Dict]) -> Dict:
+        """
+        Analyze inference results and provide statistics
+        
+        Args:
+            results: List of inference results
+            
+        Returns:
+            Analysis dictionary with statistics
+        """
+        successful_results = [r for r in results if r['success']]
+        
+        if not successful_results:
+            return {"error": "No successful generations to analyze"}
+        
+        analysis = {
+            'total_samples': len(results),
+            'successful_samples': len(successful_results),
+            'success_rate': len(successful_results) / len(results),
+            'average_input_length': np.mean([r['input_length'] for r in successful_results]),
+            'average_output_length': np.mean([r['output_length'] for r in successful_results]),
+            'languages': {},
+            'generation_errors': []
+        }
+        
+        # Language distribution
+        for result in results:
+            lang = result.get('language', 'unknown')
+            analysis['languages'][lang] = analysis['languages'].get(lang, 0) + 1
+        
+        # Collect errors
+        for result in results:
+            if not result['success'] and result.get('error'):
+                analysis['generation_errors'].append(result['error'])
+        
+        return analysis
+    
+    def save_results(
+        self, 
+        results: List[Dict], 
+        output_path: str,
+        include_analysis: bool = True
+    ):
+        """
+        Save inference results to file
+        
+        Args:
+            results: Inference results
+            output_path: Path to save results (CSV format)
+            include_analysis: Whether to include analysis summary
+        """
+        # Convert to DataFrame
+        df_results = pd.DataFrame(results)
+        
+        # Save main results
+        df_results.to_csv(output_path, index=False)
+        logger.info(f"💾 Results saved to: {output_path}")
+        
+        if include_analysis:
+            analysis = self.analyze_results(results)
+            analysis_path = output_path.replace('.csv', '_analysis.txt')
+            
+            with open(analysis_path, 'w', encoding='utf-8') as f:
+                f.write("🔬 INFERENCE ANALYSIS REPORT\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Total samples: {analysis['total_samples']}\n")
+                f.write(f"Successful generations: {analysis['successful_samples']}\n")
+                f.write(f"Success rate: {analysis['success_rate']:.2%}\n")
+                f.write(f"Average input length: {analysis['average_input_length']:.1f} chars\n")
+                f.write(f"Average output length: {analysis['average_output_length']:.1f} chars\n")
+                f.write(f"\nLanguage distribution:\n")
+                for lang, count in analysis['languages'].items():
+                    f.write(f"  {lang}: {count} samples\n")
+                
+                if analysis['generation_errors']:
+                    f.write(f"\nGeneration errors ({len(analysis['generation_errors'])}):\n")
+                    for error in analysis['generation_errors'][:5]:  # Show first 5
+                        f.write(f"  • {error}\n")
+            
+            logger.info(f"📊 Analysis saved to: {analysis_path}")
+    
+    def print_sample_results(self, results: List[Dict], n_samples: int = 3):
+        """
+        Print sample results for inspection
+        
+        Args:
+            results: Inference results
+            n_samples: Number of samples to display
+        """
+        print("\n" + "🔍" * 20 + " SAMPLE INFERENCE RESULTS " + "🔍" * 20)
+        
+        successful_results = [r for r in results if r['success']]
+        sample_results = successful_results[:n_samples]
+        
+        for i, result in enumerate(sample_results, 1):
+            print(f"\n📝 Sample {i}:")
+            print(f"🔴 Original toxic:     {result['original_toxic']}")
+            print(f"🤖 Model prediction:   {result['generated_text']}")
+            print(f"✅ Reference neutral:  {result['reference_neutral']}")
+            print(f"🌍 Language:           {result['language']}")
+            print(f"📏 Input length:       {result['input_length']} chars")
+            print(f"📏 Output length:      {result['output_length']} chars")
+            print("-" * 80)
+        
+        print(f"\n📊 Showing {len(sample_results)} of {len(results)} total results")
+        print("🔍" * 70)
