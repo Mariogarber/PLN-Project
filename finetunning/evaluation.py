@@ -6,7 +6,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from difflib import SequenceMatcher
 import warnings
 warnings.filterwarnings('ignore')
-from utils import detoxify_text
+from .utils import detoxify_text
 import pandas as pd
 import torch
 from typing import List, Dict, Union, Optional
