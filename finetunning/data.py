@@ -105,11 +105,11 @@ def get_forbidden_token_ids(forbidden_words_list: List[str], tokenizer: T5Tokeni
         forbidden_token_ids.update(token_ids)
     return list(forbidden_token_ids)
 
-def tokenize_function(inputs, add_prefix=True):
+def tokenize_function(inputs, prefix="detoxify: "):
     """Tokenize the dataset for T5 training"""
     # Create input text with task prefix
-    if add_prefix:
-        input_texts = [f"detoxify: {text}" for text in inputs['toxic_sentence']]
+    if prefix:
+        input_texts = [f"{prefix}{text}" for text in inputs['toxic_sentence']]
     else:
         input_texts = inputs['toxic_sentence']
     target_texts = inputs['neutral_sentence']
@@ -134,10 +134,10 @@ def tokenize_function(inputs, add_prefix=True):
     model_inputs["labels"] = labels["input_ids"]
     return model_inputs
 
-def preprocess_dataset(dataset, add_prefix=True):
+def preprocess_dataset(dataset, prefix="detoxify: "):
     """Preprocess the entire dataset with tokenization"""
     tokenized_dataset = dataset.map(
-        lambda x: tokenize_function(x, add_prefix=add_prefix),
+        lambda x: tokenize_function(x, prefix=prefix),
         batched=True,
         remove_columns=dataset.column_names
     )
