@@ -165,11 +165,7 @@ class ToxicMaskTrainer_V1(Trainer):
         self.logger = logging.getLogger("ToxicMaskTrainer")
         self.logger.info(f"🎭 ToxicMaskTrainer initialized")
         self.logger.info(f"🚫 Tracking {len(forbidden_words)} forbidden words")
-        
-        self.logger = logging.getLogger("ToxicMaskTrainer")
-        self.logger.info(f"🎭 ToxicMaskTrainer initialized")
-        self.logger.info(f"🚫 Tracking {len(self.forbidden_token_ids)} forbidden token IDs")
-        self.logger.info(f"📋 Strategy: {mask_strategy}")
+        self.logger.info(f"🛡️ Mask strategy: {mask_strategy}")
         
         # Statistics tracking
         self.step_stats = []
