@@ -99,11 +99,65 @@ def get_forbidden_words_list(toxic_spans_dataset) -> List[str]:
     return forbidden_words_list
 
 def get_forbidden_token_ids(forbidden_words_list: List[str], tokenizer: T5Tokenizer) -> List[int]:
+    """
+    Get forbidden token IDs from forbidden words.
+    
+    CRITICAL: This function now handles tokenization context properly.
+    We test multiple tokenization contexts to catch different token splits.
+    """
     forbidden_token_ids = set()
+    
+    # Test contexts to catch different tokenization patterns
+    test_contexts = [
+        "",  # Standalone word
+        " ",  # With leading space
+        " {} ",  # With surrounding spaces
+        "The {} is",  # In sentence context
+        "{}!",  # With punctuation
+        "{} and"  # In compound context
+    ]
+    
     for word in forbidden_words_list:
-        token_ids = tokenizer.encode(word, add_special_tokens=False)
-        forbidden_token_ids.update(token_ids)
-    return list(forbidden_token_ids)
+        # Skip empty or very short words
+        if not word or len(word.strip()) < 2:
+            continue
+            
+        word = word.strip().lower()
+        
+        # Test word in different contexts
+        for context in test_contexts:
+            if "{}" in context:
+                test_text = context.format(word)
+            else:
+                test_text = context + word
+                
+            # Tokenize and find word boundaries
+            token_ids = tokenizer.encode(test_text, add_special_tokens=False)
+            
+            # For contexts with {}, try to isolate the word tokens
+            if "{}" in context:
+                # Also tokenize the context without the word to subtract
+                context_only = context.replace(" {} ", " ").replace("{}", "").strip()
+                if context_only:
+                    context_tokens = tokenizer.encode(context_only, add_special_tokens=False)
+                    # Find tokens that are in test_text but not in context_only
+                    word_tokens = [tid for tid in token_ids if tid not in context_tokens]
+                    forbidden_token_ids.update(word_tokens)
+                else:
+                    forbidden_token_ids.update(token_ids)
+            else:
+                forbidden_token_ids.update(token_ids)
+    
+    # Also add direct tokenization for safety
+    for word in forbidden_words_list:
+        if word and len(word.strip()) >= 2:
+            word = word.strip().lower()
+            direct_tokens = tokenizer.encode(word, add_special_tokens=False)
+            forbidden_token_ids.update(direct_tokens)
+    
+    result = list(forbidden_token_ids)
+    print(f"🚫 Generated {len(result)} forbidden token IDs from {len(forbidden_words_list)} words")
+    return result
 
 def tokenize_function(inputs, prefix="detoxify: "):
     """Tokenize the dataset for T5 training"""

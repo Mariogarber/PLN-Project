@@ -114,7 +114,8 @@ def build_trainer(trainer_name,
             forbidden_token_ids=forbidden_token_ids,
             mask_strategy=kwargs.get("mask_strategy", "toxic_only"),
             context_window=kwargs.get("context_window", 2),
-            callbacks=callbacks
+            callbacks=callbacks,
+            tokenizer=TOKENIZER
         )
     else:
         raise ValueError(f"Unknown trainer name: {trainer_name}")
@@ -189,9 +190,11 @@ class ToxicMaskTrainer_V1(Trainer):
                 f"Toxic: {stats['toxic_positions']} ({stats['toxic_ratio_percent']:.1f}%)"
             )
         
-        # Apply mask to labels - set non-masked positions to -100 (ignored)
+        # Apply mask to labels
+        # mask=True means "train on this position", mask=False means "ignore this position"
+        # For toxic_only strategy: mask=True only for toxic token positions
         masked_labels = labels.clone()
-        masked_labels[~mask] = -100
+        masked_labels[~mask] = -100  # Set ignored positions to -100
         
         # Compute cross-entropy loss only on masked positions
         loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
@@ -229,3 +232,74 @@ class ToxicMaskTrainer_V1(Trainer):
             'context_window': self.context_window,
             'forbidden_token_count': len(self.forbidden_token_ids)
         }
+
+    def validate_dataset_toxicity(self, dataset, max_samples: int = 100) -> dict:
+        """
+        Validate that the dataset actually contains forbidden tokens.
+        This helps debug cases where no masking occurs.
+        
+        Args:
+            dataset: The training dataset to validate
+            max_samples: Maximum number of samples to check
+            
+        Returns:
+            Dictionary with validation results
+        """
+        validation_results = {
+            'samples_checked': 0,
+            'samples_with_toxic': 0,
+            'total_toxic_positions': 0,
+            'forbidden_tokens_found': set(),
+            'sample_details': []
+        }
+        
+        self.logger.info(f"🔍 Validating dataset for toxic tokens...")
+        
+        # Check subset of dataset
+        subset_size = min(max_samples, len(dataset))
+        for i in range(subset_size):
+            sample = dataset[i]
+            
+            # Extract labels
+            if isinstance(sample, dict) and 'labels' in sample:
+                labels = torch.tensor(sample['labels']).unsqueeze(0)  # Add batch dimension
+            else:
+                self.logger.warning(f"Sample {i} doesn't have 'labels' key")
+                continue
+            
+            # Use the mask generator to get debug info
+            debug_info = self.mask_generator.debug_toxicity_detection(labels, sample_size=1)
+            
+            validation_results['samples_checked'] += 1
+            
+            if debug_info['overall_stats']['samples_with_toxic'] > 0:
+                validation_results['samples_with_toxic'] += 1
+                validation_results['total_toxic_positions'] += debug_info['overall_stats']['total_toxic_positions']
+                
+                # Collect found tokens
+                for sample_detail in debug_info['samples_analyzed']:
+                    for toxic in sample_detail['toxic_details']:
+                        validation_results['forbidden_tokens_found'].add(
+                            (toxic['token_id'], toxic['token_text'])
+                        )
+                
+                # Store sample details for first few toxic samples
+                if len(validation_results['sample_details']) < 5:
+                    validation_results['sample_details'].append({
+                        'sample_index': i,
+                        'toxic_count': debug_info['overall_stats']['total_toxic_positions'],
+                        'text_preview': debug_info['samples_analyzed'][0]['decoded_text']
+                    })
+        
+        # Convert set to list for JSON serialization
+        validation_results['forbidden_tokens_found'] = list(validation_results['forbidden_tokens_found'])
+        
+        # Log results
+        toxic_ratio = validation_results['samples_with_toxic'] / max(validation_results['samples_checked'], 1)
+        self.logger.info(
+            f"📊 Dataset validation: {validation_results['samples_with_toxic']}/{validation_results['samples_checked']} "
+            f"samples contain toxic tokens ({toxic_ratio:.1%})"
+        )
+        self.logger.info(f"🚫 Found {len(validation_results['forbidden_tokens_found'])} unique forbidden tokens")
+        
+        return validation_results

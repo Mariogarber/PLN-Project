@@ -154,6 +154,68 @@ class ToxicTokenMaskGenerator:
             'strategy': self.mask_strategy
         }
 
+    def debug_toxicity_detection(
+        self,
+        labels: torch.Tensor,
+        sample_size: int = 5
+    ) -> dict:
+        """
+        Debug helper to check if toxic tokens are being detected properly.
+        
+        Args:
+            labels: Label tensor to analyze
+            sample_size: Number of samples to analyze in detail
+            
+        Returns:
+            Dictionary with debug information
+        """
+        debug_info = {
+            'total_samples': labels.shape[0],
+            'forbidden_token_ids': list(self.forbidden_token_ids)[:20],  # First 20 for display
+            'samples_analyzed': [],
+            'overall_stats': {
+                'total_toxic_positions': 0,
+                'samples_with_toxic': 0
+            }
+        }
+        
+        # Analyze each sample in batch
+        for i in range(min(sample_size, labels.shape[0])):
+            sample_labels = labels[i]
+            valid_positions = (sample_labels != -100) & (sample_labels != self.tokenizer.pad_token_id)
+            valid_tokens = sample_labels[valid_positions]
+            
+            # Check for toxic tokens in this sample
+            toxic_found = []
+            for token_id in valid_tokens:
+                if token_id.item() in self.forbidden_token_ids:
+                    toxic_found.append({
+                        'token_id': token_id.item(),
+                        'token_text': self.tokenizer.decode([token_id]),
+                        'position': torch.where(sample_labels == token_id)[0].tolist()
+                    })
+            
+            # Decode full text for context
+            try:
+                full_text = self.tokenizer.decode(valid_tokens, skip_special_tokens=True)
+            except:
+                full_text = "[Unable to decode]"
+            
+            sample_info = {
+                'sample_index': i,
+                'total_valid_tokens': len(valid_tokens),
+                'toxic_tokens_found': len(toxic_found),
+                'toxic_details': toxic_found,
+                'decoded_text': full_text[:100] + "..." if len(full_text) > 100 else full_text
+            }
+            
+            debug_info['samples_analyzed'].append(sample_info)
+            debug_info['overall_stats']['total_toxic_positions'] += len(toxic_found)
+            if len(toxic_found) > 0:
+                debug_info['overall_stats']['samples_with_toxic'] += 1
+        
+        return debug_info
+
 
 def create_toxic_token_mask(
     tokenizer,

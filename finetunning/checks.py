@@ -341,7 +341,7 @@ def quick_toxic_mask_check(
     test_sentence: str = "You are such a stupid idiot."
 ) -> bool:
     """
-    🚀 Quick validation check for toxic masking functionality
+    🚀 Enhanced validation check for toxic masking functionality
     
     Args:
         tokenizer: Tokenizer to use
@@ -352,43 +352,102 @@ def quick_toxic_mask_check(
         bool: True if basic functionality works
     """
     try:
-        from .utils import analyze_sentence_toxicity, create_toxic_token_mask
+        from .utils import analyze_sentence_toxicity, create_toxic_token_mask, ToxicTokenMaskGenerator
         
-        print("🚀 Quick Toxic Mask Check")
-        print("-" * 30)
+        print("🚀 Enhanced Toxic Mask Check")
+        print("-" * 40)
+        
+        # First, let's analyze the tokenization
+        inputs = tokenizer(test_sentence, return_tensors="pt")
+        labels = inputs["input_ids"].clone()
+        
+        print(f"📝 Test sentence: '{test_sentence}'")
+        print(f"📊 Tokenized to {inputs['input_ids'].shape[1]} tokens")
+        
+        # Show first few tokens for debugging
+        first_tokens = inputs["input_ids"][0][:10].tolist()
+        token_texts = [tokenizer.decode([tid]) for tid in first_tokens]
+        print(f"🔍 First tokens: {list(zip(first_tokens, token_texts))}")
+        
+        # Check which forbidden tokens are actually in the labels
+        found_forbidden = []
+        for token_id in forbidden_token_ids[:20]:  # Check first 20
+            if token_id in labels[0]:
+                found_forbidden.append((token_id, tokenizer.decode([token_id])))
+        
+        print(f"🚫 Forbidden tokens found in sentence: {found_forbidden}")
         
         # Test sentence analysis
         analysis = analyze_sentence_toxicity(
             sentence=test_sentence,
             tokenizer=tokenizer,
-            forbidden_token_ids=forbidden_token_ids[:10],
+            forbidden_token_ids=forbidden_token_ids,
             return_positions=True
         )
         
-        print(f"📝 Test sentence: '{test_sentence}'")
-        print(f"🚫 Toxic tokens found: {analysis['toxic_count']}")
-        print(f"📊 Toxicity ratio: {analysis['toxic_ratio']:.2%}")
+        print(f"🎯 Analysis results:")
+        print(f"  • Toxic tokens found: {analysis['toxic_count']}")
+        print(f"  • Toxicity ratio: {analysis['toxic_ratio']:.2%}")
+        print(f"  • Toxic words: {analysis['toxic_tokens']}")
         
-        # Test masking
-        inputs = tokenizer(test_sentence, return_tensors="pt")
-        masked_labels = create_toxic_token_mask(
-            input_ids=inputs["input_ids"],
-            labels=inputs["input_ids"].clone(),
-            forbidden_token_ids=forbidden_token_ids[:10],
+        # Test masking with debug info
+        mask_generator = ToxicTokenMaskGenerator(
             tokenizer=tokenizer,
-            strategy="toxic_only"
+            forbidden_token_ids=forbidden_token_ids,
+            mask_strategy="toxic_only"
         )
         
-        masked_count = (masked_labels == -100).sum().item()
-        print(f"🎭 Positions masked: {masked_count}")
+        # Get debug info
+        debug_info = mask_generator.debug_toxicity_detection(labels, sample_size=1)
+        print(f"🔍 Debug toxicity detection:")
+        for sample in debug_info['samples_analyzed']:
+            print(f"  • Sample: {sample['toxic_tokens_found']} toxic tokens found")
+            print(f"  • Text: {sample['decoded_text']}")
+            for toxic in sample['toxic_details']:
+                print(f"    - '{toxic['token_text']}' (ID: {toxic['token_id']}) at positions {toxic['position']}")
         
-        success = analysis['toxic_count'] > 0 and masked_count > 0
-        print(f"✅ Quick check: {'PASSED' if success else 'FAILED'}")
+        # Test masking
+        mask = mask_generator.create_toxic_token_mask(
+            input_ids=inputs["input_ids"],
+            labels=labels,
+            context_window=2
+        )
+        
+        masked_positions = mask.sum().item()
+        total_positions = ((labels != -100) & (labels != tokenizer.pad_token_id)).sum().item()
+        
+        print(f"🎭 Masking results:")
+        print(f"  • Positions to train on: {masked_positions}/{total_positions}")
+        print(f"  • Masking ratio: {masked_positions/max(total_positions,1)*100:.1f}%")
+        
+        # Enhanced success criteria
+        has_forbidden_tokens = len(found_forbidden) > 0
+        analysis_found_toxic = analysis['toxic_count'] > 0
+        masking_worked = masked_positions > 0
+        
+        print(f"\n📊 Validation Results:")
+        print(f"  • Forbidden tokens in sentence: {'✅' if has_forbidden_tokens else '❌'} ({len(found_forbidden)} found)")
+        print(f"  • Analysis detected toxic: {'✅' if analysis_found_toxic else '❌'} ({analysis['toxic_count']} found)")
+        print(f"  • Masking worked: {'✅' if masking_worked else '❌'} ({masked_positions} positions)")
+        
+        success = has_forbidden_tokens and analysis_found_toxic and masking_worked
+        print(f"\n🎯 Overall result: {'✅ PASSED' if success else '❌ FAILED'}")
+        
+        if not success:
+            print(f"\n🚨 TROUBLESHOOTING:")
+            if not has_forbidden_tokens:
+                print(f"  • No forbidden tokens found in sentence - check tokenization consistency")
+            if not analysis_found_toxic:
+                print(f"  • Analysis didn't detect toxicity - check forbidden_token_ids")
+            if not masking_worked:
+                print(f"  • Masking didn't work - check mask generation logic")
         
         return success
         
     except Exception as e:
         print(f"❌ Quick check failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
