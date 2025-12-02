@@ -123,6 +123,25 @@ def build_trainer(trainer_name,
             callbacks=callbacks,
             tokenizer=TOKENIZER
         )
+    elif trainer_name == "sentinel_span":
+        # Sentinel token span corruption approach
+        forbidden_words = kwargs.get("forbidden_words")
+        if not forbidden_words:
+            raise ValueError("forbidden_words must be provided for sentinel_span trainer")
+        
+        trainer = SentinelSpanTrainer(
+            model=model,
+            args=args,
+            train_dataset=dataset_dict["train"],
+            eval_dataset=dataset_dict.get("validation", None),
+            data_collator=data_collator,
+            forbidden_words=forbidden_words,
+            case_sensitive=kwargs.get("case_sensitive", False),
+            match_partial=kwargs.get("match_partial", True),
+            max_sentinels=kwargs.get("max_sentinels", 100),
+            callbacks=callbacks,
+            tokenizer=TOKENIZER
+        )
     else:
         raise ValueError(f"Unknown trainer name: {trainer_name}")
     
@@ -193,11 +212,16 @@ class ToxicMaskTrainer_V1(Trainer):
             stats = self.mask_generator.get_mask_statistics(input_ids, labels, mask)
             self.step_stats.append(stats)
             
+            # Word-level stats use different keys than token-level
+            toxic_info = f"Toxic words: {stats.get('toxic_word_occurrences', 0)} occurrences"
+            if 'toxic_words_found' in stats:
+                toxic_info += f" ({len(stats['toxic_words_found'])} unique)"
+            
             self.logger.info(
                 f"Step {self.state.global_step}: "
                 f"Masked {stats['masked_positions']}/{stats['total_valid_positions']} positions "
                 f"({stats['mask_ratio_percent']:.1f}%), "
-                f"Toxic: {stats['toxic_positions']} ({stats['toxic_ratio_percent']:.1f}%)"
+                f"{toxic_info}"
             )
         
         # Apply mask to labels
@@ -229,15 +253,22 @@ class ToxicMaskTrainer_V1(Trainer):
         if not self.step_stats:
             return {}
         
-        # Aggregate statistics
+        # Aggregate statistics (handle both word-level and token-level stats)
         total_steps = len(self.step_stats)
         avg_mask_ratio = np.mean([s['mask_ratio_percent'] for s in self.step_stats])
-        avg_toxic_ratio = np.mean([s['toxic_ratio_percent'] for s in self.step_stats])
+        
+        # Word-level stats use 'toxic_words_per_sample' instead of 'toxic_ratio_percent'
+        if 'toxic_words_per_sample' in self.step_stats[0]:
+            avg_toxic_info = np.mean([s['toxic_words_per_sample'] for s in self.step_stats])
+            toxic_key = 'average_toxic_words_per_sample'
+        else:
+            avg_toxic_info = np.mean([s.get('toxic_ratio_percent', 0) for s in self.step_stats])
+            toxic_key = 'average_toxic_ratio_percent'
         
         return {
             'total_logged_steps': total_steps,
             'average_mask_ratio_percent': avg_mask_ratio,
-            'average_toxic_ratio_percent': avg_toxic_ratio,
+            toxic_key: avg_toxic_info,
             'mask_strategy': self.mask_strategy,
             'context_window': self.context_window,
             'masking_approach': 'word-level',
@@ -314,3 +345,240 @@ class ToxicMaskTrainer_V1(Trainer):
         self.logger.info(f"🚫 Found {len(validation_results['forbidden_tokens_found'])} unique forbidden tokens")
         
         return validation_results
+
+
+class SentinelSpanTrainer(Trainer):
+    """
+    Trainer that replaces toxic words with T5 sentinel tokens (<extra_id_X>).
+    Uses T5's span corruption approach for detoxification.
+    
+    The model learns to fill in sentinel positions with non-toxic alternatives.
+    Contiguous toxic words are replaced with a single sentinel token.
+    """
+    
+    def __init__(
+        self,
+        forbidden_words: List[str],
+        case_sensitive: bool = False,
+        match_partial: bool = True,
+        max_sentinels: int = 100,
+        **kwargs
+    ):
+        """
+        Initialize sentinel span trainer.
+        
+        Args:
+            forbidden_words: List of toxic words to replace
+            case_sensitive: Whether word matching is case sensitive
+            match_partial: Whether to match partial word occurrences
+            max_sentinels: Maximum number of sentinel tokens to use
+            **kwargs: Additional arguments for Trainer
+        """
+        super().__init__(**kwargs)
+        
+        self.forbidden_words = forbidden_words
+        self.case_sensitive = case_sensitive
+        self.match_partial = match_partial
+        self.max_sentinels = max_sentinels
+        
+        # Import SentinelTokenReplacer
+        from .utils import SentinelTokenReplacer
+        
+        self.sentinel_replacer = SentinelTokenReplacer(
+            tokenizer=self.tokenizer,
+            forbidden_words=forbidden_words,
+            case_sensitive=case_sensitive,
+            match_partial=match_partial
+        )
+        
+        self.logger = logging.getLogger("SentinelSpanTrainer")
+        self.logger.info(f"🎯 SentinelSpanTrainer initialized")
+        self.logger.info(f"🚫 Tracking {len(forbidden_words)} forbidden words")
+        self.logger.info(f"📋 Case sensitive: {case_sensitive}")
+        self.logger.info(f"📋 Partial matching: {match_partial}")
+        
+        # Statistics tracking
+        self.step_stats = []
+        self.total_sentinels_used = 0
+        self.total_spans_replaced = 0
+    
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Custom loss computation with sentinel token replacement.
+        
+        Process:
+            1. Decode input and target sequences
+            2. Replace toxic words with sentinels in input
+            3. Create corresponding sentinel-based target
+            4. Re-tokenize and compute standard cross-entropy loss
+        """
+        # Get original inputs
+        input_ids = inputs["input_ids"]
+        labels = inputs["labels"]
+        batch_size = input_ids.size(0)
+        device = input_ids.device
+        
+        # Transform batch with sentinel replacements
+        transformed_inputs = self._transform_batch_for_training(inputs)
+        
+        # Forward pass with transformed inputs
+        outputs = model(
+            input_ids=transformed_inputs["input_ids"],
+            attention_mask=transformed_inputs["attention_mask"],
+            labels=transformed_inputs["labels"]
+        )
+        
+        loss = outputs.loss
+        
+        # Log statistics periodically
+        if self.state.global_step % 50 == 0:
+            self.logger.info(
+                f"Step {self.state.global_step}: "
+                f"Loss: {loss.item():.4f}, "
+                f"Avg sentinels/sample: {self.total_sentinels_used / max(self.state.global_step, 1):.2f}"
+            )
+        
+        return (loss, outputs) if return_outputs else loss
+    
+    def _transform_batch_for_training(
+        self,
+        inputs: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Transform batch by replacing toxic words with sentinels.
+        
+        Args:
+            inputs: Dict with 'input_ids', 'attention_mask', 'labels'
+            
+        Returns:
+            Transformed batch with sentinel tokens
+        """
+        input_ids = inputs["input_ids"]
+        labels = inputs["labels"]
+        batch_size = input_ids.size(0)
+        device = input_ids.device
+        
+        transformed_input_ids = []
+        transformed_labels = []
+        transformed_attention_masks = []
+        
+        batch_sentinel_count = 0
+        
+        for i in range(batch_size):
+            # Decode input (remove special tokens and padding)
+            input_tokens = input_ids[i]
+            valid_input = input_tokens[input_tokens != self.tokenizer.pad_token_id]
+            input_text = self.tokenizer.decode(valid_input, skip_special_tokens=True)
+            
+            # Decode labels (target)
+            label_tokens = labels[i]
+            valid_labels = label_tokens[(label_tokens != -100) & (label_tokens != self.tokenizer.pad_token_id)]
+            target_text = self.tokenizer.decode(valid_labels, skip_special_tokens=True)
+            
+            # Replace toxic words in INPUT with sentinels
+            modified_input, replacements = self.sentinel_replacer.replace_toxic_with_sentinels(input_text)
+            
+            # Create target sequence with sentinels
+            # For detoxification: target should teach model to generate clean alternatives
+            # We use sentinel markers in target to align with input sentinels
+            if replacements:
+                # Target format: "<extra_id_0> <extra_id_1> ... <remaining_text>"
+                # This teaches model: at sentinel positions, continue with normal text
+                target_sentinels = self.sentinel_replacer.create_target_sequence(replacements)
+                modified_target = target_sentinels
+                
+                batch_sentinel_count += len(replacements)
+            else:
+                # No toxic words, keep original target
+                modified_target = target_text
+            
+            # Re-tokenize modified input and target
+            tokenized_input = self.tokenizer(
+                modified_input,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt"
+            )
+            
+            tokenized_target = self.tokenizer(
+                modified_target,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt"
+            )
+            
+            # Store transformed sequences
+            transformed_input_ids.append(tokenized_input["input_ids"][0])
+            transformed_attention_masks.append(tokenized_input["attention_mask"][0])
+            transformed_labels.append(tokenized_target["input_ids"][0])
+        
+        # Update statistics
+        self.total_sentinels_used += batch_sentinel_count
+        self.total_spans_replaced += batch_sentinel_count
+        
+        # Pad sequences to same length
+        max_input_len = max(seq.size(0) for seq in transformed_input_ids)
+        max_label_len = max(seq.size(0) for seq in transformed_labels)
+        
+        padded_input_ids = []
+        padded_attention_masks = []
+        padded_labels = []
+        
+        for i in range(batch_size):
+            # Pad input
+            input_seq = transformed_input_ids[i]
+            input_pad_len = max_input_len - input_seq.size(0)
+            padded_input = torch.nn.functional.pad(
+                input_seq, 
+                (0, input_pad_len), 
+                value=self.tokenizer.pad_token_id
+            )
+            padded_input_ids.append(padded_input)
+            
+            # Pad attention mask
+            attn_seq = transformed_attention_masks[i]
+            attn_pad_len = max_input_len - attn_seq.size(0)
+            padded_attn = torch.nn.functional.pad(
+                attn_seq,
+                (0, attn_pad_len),
+                value=0
+            )
+            padded_attention_masks.append(padded_attn)
+            
+            # Pad labels
+            label_seq = transformed_labels[i]
+            label_pad_len = max_label_len - label_seq.size(0)
+            padded_label = torch.nn.functional.pad(
+                label_seq,
+                (0, label_pad_len),
+                value=-100
+            )
+            padded_labels.append(padded_label)
+        
+        # Stack into batch tensors
+        return {
+            "input_ids": torch.stack(padded_input_ids).to(device),
+            "attention_mask": torch.stack(padded_attention_masks).to(device),
+            "labels": torch.stack(padded_labels).to(device)
+        }
+    
+    def get_training_statistics(self) -> dict:
+        """
+        Get training statistics specific to sentinel span approach.
+        
+        Returns:
+            Dict with sentinel replacement statistics
+        """
+        if self.state.global_step == 0:
+            return {}
+        
+        avg_sentinels = self.total_sentinels_used / self.state.global_step
+        
+        return {
+            'total_training_steps': self.state.global_step,
+            'total_sentinels_used': self.total_sentinels_used,
+            'total_spans_replaced': self.total_spans_replaced,
+            'average_sentinels_per_step': avg_sentinels,
+            'forbidden_word_count': len(self.forbidden_words),
+            'approach': 'sentinel_span_corruption'
+        }

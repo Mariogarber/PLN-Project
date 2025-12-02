@@ -597,3 +597,231 @@ def check_trainable_params(model):
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Trainable parameters: {trainable_params} / {total_params} ({100 * trainable_params / total_params:.2f}%)")
     return trainable_params, total_params
+
+
+class SentinelTokenReplacer:
+    """
+    Replaces toxic words with T5 sentinel tokens (<extra_id_X>).
+    Contiguous toxic words are replaced with a single sentinel token.
+    """
+    
+    def __init__(
+        self,
+        tokenizer,
+        forbidden_words: List[str],
+        case_sensitive: bool = False,
+        match_partial: bool = True
+    ):
+        """
+        Initialize the sentinel token replacer.
+        
+        Args:
+            tokenizer: T5 tokenizer
+            forbidden_words: List of forbidden words/phrases
+            case_sensitive: Whether word matching is case sensitive
+            match_partial: Whether to match partial word occurrences
+        """
+        self.tokenizer = tokenizer
+        self.forbidden_words = [word.strip() for word in (forbidden_words or []) if word.strip()]
+        self.case_sensitive = case_sensitive
+        self.match_partial = match_partial
+        
+        # Prepare forbidden words for matching
+        if not self.case_sensitive:
+            self.forbidden_words = [word.lower() for word in self.forbidden_words]
+        
+        print(f"🎯 SentinelTokenReplacer initialized")
+        print(f"🚫 Tracking {len(self.forbidden_words)} forbidden words")
+        print(f"📋 Case sensitive: {case_sensitive}")
+        print(f"📋 Partial matching: {match_partial}")
+    
+    def _find_toxic_words_in_text(self, text: str) -> List[Tuple[int, int, str]]:
+        """
+        Find toxic word positions in text.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            List of (start_pos, end_pos, word) tuples sorted by position
+        """
+        import re
+        
+        search_text = text if self.case_sensitive else text.lower()
+        toxic_positions = []
+        
+        for word in self.forbidden_words:
+            # Create regex pattern for word matching
+            if self.match_partial:
+                # Match word as part of larger words
+                pattern = re.escape(word)
+            else:
+                # Match only whole words
+                pattern = r'\b' + re.escape(word) + r'\b'
+            
+            # Find all matches
+            for match in re.finditer(pattern, search_text):
+                toxic_positions.append((match.start(), match.end(), word))
+        
+        return sorted(toxic_positions, key=lambda x: x[0])  # Sort by start position
+    
+    def _merge_contiguous_spans(
+        self, 
+        toxic_positions: List[Tuple[int, int, str]], 
+        text: str
+    ) -> List[Tuple[int, int, List[str]]]:
+        """
+        Merge contiguous toxic word spans into single spans.
+        Words separated only by whitespace/punctuation are considered contiguous.
+        
+        Args:
+            toxic_positions: List of (start, end, word) tuples
+            text: Original text
+            
+        Returns:
+            List of (start, end, [words]) tuples for merged spans
+            
+        Example:
+            Input: "fucking stupid" -> [(0, 7, "fucking"), (8, 14, "stupid")]
+            Output: [(0, 14, ["fucking", "stupid"])]
+        """
+        if not toxic_positions:
+            return []
+        
+        merged_spans = []
+        current_start, current_end, current_words = toxic_positions[0][0], toxic_positions[0][1], [toxic_positions[0][2]]
+        
+        for i in range(1, len(toxic_positions)):
+            start, end, word = toxic_positions[i]
+            
+            # Check the text between current span and next toxic word
+            between_text = text[current_end:start]
+            
+            # If only whitespace or punctuation between them, merge
+            if between_text.strip() == '' or all(c in ' \t\n,.!?;:\'"' for c in between_text):
+                # Extend current span
+                current_end = end
+                current_words.append(word)
+            else:
+                # Save current span and start new one
+                merged_spans.append((current_start, current_end, current_words))
+                current_start, current_end, current_words = start, end, [word]
+        
+        # Add the last span
+        merged_spans.append((current_start, current_end, current_words))
+        
+        return merged_spans
+    
+    def replace_toxic_with_sentinels(
+        self, 
+        text: str
+    ) -> Tuple[str, List[Tuple[List[str], int]]]:
+        """
+        Replace toxic words in text with sentinel tokens.
+        Contiguous toxic words are replaced with a single sentinel.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            - modified_text: Text with toxic words replaced by sentinels
+            - replacements: List of ([original_words], sentinel_id) tuples
+            
+        Example:
+            Input: "Hey you fucking stupid boy, what are you fucking doing"
+            Output: ("Hey you <extra_id_0> boy, what are you <extra_id_1> doing",
+                     [(["fucking", "stupid"], 0), (["fucking"], 1)])
+        """
+        # Find all toxic word positions
+        toxic_positions = self._find_toxic_words_in_text(text)
+        
+        if not toxic_positions:
+            return text, []
+        
+        # Merge contiguous toxic spans
+        merged_spans = self._merge_contiguous_spans(toxic_positions, text)
+        
+        # Build modified text with sentinels
+        modified_text = ""
+        last_pos = 0
+        replacements = []
+        
+        for sentinel_id, (start, end, words) in enumerate(merged_spans):
+            # Add text before toxic span
+            modified_text += text[last_pos:start]
+            
+            # Add sentinel token
+            sentinel = f"<extra_id_{sentinel_id}>"
+            modified_text += sentinel
+            
+            # Record replacement
+            replacements.append((words, sentinel_id))
+            
+            # Update position
+            last_pos = end
+        
+        # Add remaining text
+        modified_text += text[last_pos:]
+        
+        return modified_text, replacements
+    
+    def create_target_sequence(
+        self,
+        replacements: List[Tuple[List[str], int]]
+    ) -> str:
+        """
+        Create T5-style target sequence with sentinel tokens and their replacements.
+        
+        Args:
+            replacements: List of ([original_words], sentinel_id) tuples
+            
+        Returns:
+            Target sequence in format: "<extra_id_0> replacement <extra_id_1> replacement"
+            
+        Example:
+            Input: [(["fucking", "stupid"], 0), (["fucking"], 1)]
+            Output: "<extra_id_0> <extra_id_1>"
+            
+        Note: In span corruption, target typically just contains sentinels marking spans,
+              the model learns to generate appropriate replacements.
+        """
+        if not replacements:
+            return ""
+        
+        target_parts = []
+        for words, sentinel_id in replacements:
+            # Add sentinel marker
+            target_parts.append(f"<extra_id_{sentinel_id}>")
+        
+        return " ".join(target_parts)
+    
+    def create_target_with_alternatives(
+        self,
+        replacements: List[Tuple[List[str], int]],
+        alternatives: List[str]
+    ) -> str:
+        """
+        Create target sequence with specific alternative words.
+        Use this when you have specific non-toxic alternatives to teach.
+        
+        Args:
+            replacements: List of ([original_words], sentinel_id) tuples
+            alternatives: List of alternative phrases (same length as replacements)
+            
+        Returns:
+            Target sequence with alternatives
+            
+        Example:
+            replacements: [(["fucking", "stupid"], 0), (["fucking"], 1)]
+            alternatives: ["nice", "really"]
+            Output: "<extra_id_0> nice <extra_id_1> really"
+        """
+        if len(replacements) != len(alternatives):
+            raise ValueError(f"Mismatch: {len(replacements)} replacements but {len(alternatives)} alternatives")
+        
+        target_parts = []
+        for i, (words, sentinel_id) in enumerate(replacements):
+            target_parts.append(f"<extra_id_{sentinel_id}>")
+            target_parts.append(alternatives[i])
+        
+        return " ".join(target_parts)
