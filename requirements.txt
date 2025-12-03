@@ -16,3 +16,4 @@ accelerate
 bitsandbytes
 sentence-transformers
 scikit-learn
+protobuf==3.20.*
