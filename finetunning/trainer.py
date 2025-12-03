@@ -83,7 +83,6 @@ def build_trainer(trainer_name,
                   args,
                   dataset_dict,
                   data_collator,
-                  forbidden_token_ids,
                   penalty_weight=1.0,
                   callbacks=None,
                   **kwargs):
@@ -99,7 +98,7 @@ def build_trainer(trainer_name,
             eval_dataset = dataset_dict["validation"],
             data_collator = data_collator,
             tokenizer = TOKENIZER,
-            forbidden_tokens = forbidden_token_ids,
+            forbidden_tokens = kwargs.get("forbidden_token_ids", None),
             penalty_weight = penalty_weight,
             callbacks = callbacks
         )
