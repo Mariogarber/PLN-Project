@@ -483,7 +483,7 @@ class SentinelSpanTrainer(Trainer):
             if replacements:
                 # Target format: "<extra_id_0> <extra_id_1> ... <remaining_text>"
                 # This teaches model: at sentinel positions, continue with normal text
-                target_sentinels = self.sentinel_replacer.create_target_sequence(replacements, valid_labels)
+                target_sentinels = self.sentinel_replacer.create_target_sequence(replacements, target_text)
                 modified_target = target_sentinels
                 
                 batch_sentinel_count += len(replacements)
