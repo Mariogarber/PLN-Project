@@ -23,7 +23,8 @@ def build_training_args(output_name,
                         real_batch_size,
                         gradient_accumulation_steps,
                         num_train_epochs,
-                        learning_rate
+                        learning_rate,
+                        logging_steps=200
                         ):
     """
     Build TrainingArguments with custom parameters for finetuning mT5 using QLoRA.
@@ -96,7 +97,7 @@ def build_training_args(output_name,
         num_train_epochs=num_train_epochs,
         learning_rate=learning_rate,
         bf16=True,
-        logging_steps=200,
+        logging_steps=logging_steps,
         save_steps=500,
         eval_strategy="steps",
         eval_steps=200,
