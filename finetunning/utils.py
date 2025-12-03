@@ -766,34 +766,39 @@ class SentinelTokenReplacer:
         return modified_text, replacements
     
     def create_target_sequence(
-        self,
-        replacements: List[Tuple[List[str], int]]
-    ) -> str:
+    self,
+    replacements,
+    clean_text: str
+) -> str:
         """
-        Create T5-style target sequence with sentinel tokens and their replacements.
-        
+        Create the correct target sequence for T5-style detoxification
+        using sentinel tokens.
+
         Args:
-            replacements: List of ([original_words], sentinel_id) tuples
-            
+            replacements: list of tuples (toxic_words_list, sentinel_id)
+                        e.g., [(["fucking","stupid"], 0), (["prick"], 1)]
+            clean_text: the full detoxified sentence (string)
+
         Returns:
-            Target sequence in format: "<extra_id_0> replacement <extra_id_1> replacement"
-            
-        Example:
-            Input: [(["fucking", "stupid"], 0), (["fucking"], 1)]
-            Output: "<extra_id_0> <extra_id_1>"
-            
-        Note: In span corruption, target typically just contains sentinels marking spans,
-              the model learns to generate appropriate replacements.
+            A target string of the form:
+                "<extra_id_0> CLEAN_TEXT <extra_id_1> CLEAN_TEXT ..."
         """
+
+        # If no toxic span is found, y is returned as-is
         if not replacements:
-            return ""
-        
+            return clean_text.strip()
+
+        clean_text = clean_text.strip()
         target_parts = []
-        for words, sentinel_id in replacements:
-            # Add sentinel marker
-            target_parts.append(f"<extra_id_{sentinel_id}>")
-        
+
+        # For each sentinel_id, add: "<extra_id_k> CLEAN_TEXT"
+        for _, sentinel_id in replacements:
+            sentinel = f"<extra_id_{sentinel_id}>"
+            target_parts.append(f"{sentinel} {clean_text}")
+
+        # Join all sentinel + clean_text segments
         return " ".join(target_parts)
+
     
     def create_target_with_alternatives(
         self,
