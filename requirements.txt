@@ -17,3 +17,7 @@ bitsandbytes
 sentence-transformers
 scikit-learn
 protobuf==3.20.*
+torchvision
+torchaudio
+accelerate
+bitsandbytes

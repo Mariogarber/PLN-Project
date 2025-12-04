@@ -484,7 +484,7 @@ class DatasetAnalyzer:
                 lang=lang,
                 model_type=model_type,
                 batch_size=batch_size,
-                rescale_with_baseline=True,
+                rescale_with_baseline=False,
             )
 
         stats = {

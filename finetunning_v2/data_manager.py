@@ -3,6 +3,7 @@ from typing import List, Dict, Optional
 
 from datasets import load_dataset, concatenate_datasets, Dataset, DatasetDict
 from transformers import T5TokenizerFast
+from sklearn.model_selection import train_test_split
 
 import pandas as pd
 import numpy as np
@@ -143,7 +144,7 @@ class DataManager:
         overlap = sum(1 for w in neutral_words if w in toxic_words)
         return overlap / len(neutral_words) * 100
 
-    def compute_overlap_feature(self) -> None:
+    def compute_overlap_feature(self, threshold_1: float = 70.0, threshold_2: float = 30.0) -> None:
         """
         Inserta la columna "equal_percentage" en self.raw_dataset.
         """
@@ -155,8 +156,20 @@ class DataManager:
             for t, n in zip(batch["toxic_sentence"], batch["neutral_sentence"]):
                 values.append(self._percent_equal_words(t, n))
             return {"equal_percentage": values}
+        
+        def _map_difficulty(batch):
+            difficulties = []
+            for perc in batch["equal_percentage"]:
+                if perc >= threshold_1:
+                    difficulties.append("easy")
+                elif perc >= threshold_2:
+                    difficulties.append("medium")
+                else:
+                    difficulties.append("hard")
+            return {"difficulty": difficulties}
 
         self.raw_dataset = self.raw_dataset.map(_map, batched=True)
+        self.raw_dataset = self.raw_dataset.map(_map_difficulty, batched=True)
         self.logger.info("Cálculo de overlap (equal_percentage) completado.")
 
     # ============================================================
@@ -192,11 +205,12 @@ class DataManager:
 
         return self.splits
     
-    def get_overlap_splits(self, split_name: str = "train", threshold: float = 70.0):
+    def get_overlap_splits(self, split_name: str = "train", threshold_1: float = 70.0, threshold_2: float = 30.0):
         """
         Devuelve dos subsets del split indicado:
-        - easy: ejemplos con overlap >= threshold
-        - hard: ejemplos con overlap < threshold
+        - easy: ejemplos con overlap >= threshold_1
+        - medium: ejemplos con overlap < threshold_1 y >= threshold_2
+        - hard: ejemplos con overlap < threshold_2
         """
         if self.splits is None:
             raise ValueError("Los splits no están generados. Ejecuta make_splits() primero.")
@@ -209,100 +223,127 @@ class DataManager:
         if "equal_percentage" not in ds.column_names:
             raise ValueError("No existe la columna 'equal_percentage'. Ejecuta compute_overlap_feature().")
 
-        self.logger.info(f"Separando split '{split_name}' con umbral {threshold}%...")
+        self.logger.info(f"Separando split '{split_name}' con umbral {threshold_1}%...")
 
-        easy = ds.filter(lambda x: x["equal_percentage"] >= threshold)
-        hard = ds.filter(lambda x: x["equal_percentage"] < threshold)
+        easy = ds.filter(lambda x: x["equal_percentage"] >= threshold_1)
+        medium = ds.filter(lambda x: (x["equal_percentage"] < threshold_1) & (x["equal_percentage"] >= threshold_2))
+        hard = ds.filter(lambda x: x["equal_percentage"] < threshold_2)
 
-        self.logger.info(f" - EASY  (>= {threshold}%): {len(easy)} ejemplos")
-        self.logger.info(f" - HARD  (<  {threshold}%): {len(hard)} ejemplos")
-
-        return easy, hard
-
-
-    # ============================================================
-    # ===================== TOKENIZATION ==========================
-    # ============================================================
-
-    @staticmethod
-    def clean_text(text: str) -> str:
+        self.logger.info(f" - EASY  (>= {threshold_1}%): {len(easy)} ejemplos")
+        self.logger.info(f" - MEDIUM ({threshold_2}% - {threshold_1}%): {len(medium)} ejemplos")
+        self.logger.info(f" - HARD  (<  {threshold_2}%): {len(hard)} ejemplos")
+        return easy, medium, hard
+    
+    def stratified_split(
+        self,
+        test_size=0.1,
+        val_size=0.1,
+        stratify_by=["language", "difficulty"]
+    ):
         """
-        Limpieza ligera y segura. No agresiva.
+        Perform a safe stratified split for small multilingual detox datasets.
+
+        Splits based on:
+            - language
+            - difficulty (easy/medium/hard)
+
+        Reason: these are the only two stratification dimensions that keep buckets
+        statistically stable with ~400 samples per language.
+
+        Returns:
+            self.splits = {"train": ..., "val": ..., "test": ...}
         """
-        if text is None:
-            return ""
 
-        # Normalizar unicode
-        import unicodedata
-        text = unicodedata.normalize("NFC", text)
+        df = self.raw_dataset.to_pandas()
 
-        # Sustituir saltos de línea/tabs por espacios
-        text = text.replace("\n", " ").replace("\t", " ")
+        # Check required columns exist
+        for col in stratify_by:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column for stratification: {col}")
 
-        # Quitar espacios múltiples
-        text = " ".join(text.split())
+        # Create combined stratification key
+        df["strat_key"] = df[stratify_by].astype(str).agg("_".join, axis=1)
 
-        return text.strip()
-
-
-    def _tokenize_batch(self, batch):
-        toxic_clean = [self.clean_text(t) for t in batch["toxic_sentence"]]
-        neutral_clean = [self.clean_text(n) for n in batch["neutral_sentence"]]
-
-        inputs = [f"{self.prefix}{t}" for t in toxic_clean]
-        targets = neutral_clean
-
-        enc_inputs = self.tokenizer(
-            inputs,
-            truncation=True,
-            max_length=256,
-            padding=False
+        # First: train+val vs test
+        trainval_df, test_df = train_test_split(
+            df,
+            test_size=test_size,
+            stratify=df["strat_key"],
+            random_state=42
         )
 
-        with self.tokenizer.as_target_tokenizer():
-            enc_targets = self.tokenizer(
-                targets,
-                truncation=True,
-                max_length=256,
-                padding=False
-            )
+        # Second: train vs val
+        val_ratio = val_size / (1 - test_size)
 
-        enc_inputs["labels"] = enc_targets["input_ids"]
-        return enc_inputs
+        train_df, val_df = train_test_split(
+            trainval_df,
+            test_size=val_ratio,
+            stratify=trainval_df["strat_key"],
+            random_state=42
+        )
 
-    def tokenize_all_splits(self):
+        # Store as HF datasets
+        self.splits = {
+            "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
+            "val": Dataset.from_pandas(val_df.reset_index(drop=True)),
+            "test": Dataset.from_pandas(test_df.reset_index(drop=True)),
+        }
+
+        self.logger.info(
+            f"Stratified splits created:\n"
+            f"  train: {len(train_df)}\n"
+            f"  val:   {len(val_df)}\n"
+            f"  test:  {len(test_df)}"
+        )
+
+        return self.splits
+    
+    def create_curriculum_datasets(self):
         """
-        Tokenize all dataset splits using the configured tokenizer.
-        This method applies tokenization to all splits in the dataset (train, validation, test)
-        using batch processing for efficiency. The original columns are removed after tokenization,
-        keeping only the tokenized features.
-        Returns:
-            DatasetDict: A dictionary containing tokenized versions of all splits, where each
-                        split contains tokenized input features suitable for model training.
-        Raises:
-            ValueError: If splits have not been generated yet (self.splits is None).
-        Note:
-            - Requires that splits have been previously generated using generate_splits()
-            - Uses the _tokenize_batch method for batch tokenization
-            - Removes original text columns after tokenization to save memory
-            - Progress is logged during the tokenization process
+        Create curriculum-learning datasets:
+            - easy
+            - medium
+            - hard
+            - full
+            
+        Only applied to TRAIN split.
+        
+        Requires:
+            self.splits["train"] (HF Dataset)
+            Column 'difficulty' in train split.
         """
-        if self.splits is None:
-            raise ValueError("Los splits no están generados.")
 
-        self.logger.info("Tokenizando splits...")
+        if not hasattr(self, "splits") or "train" not in self.splits:
+            raise ValueError("You must run stratified_split() before creating curriculum datasets.")
 
-        self.tokenized_splits = DatasetDict({
-            split: self.splits[split].map(
-                self._tokenize_batch,
-                batched=True,
-                remove_columns=self.splits[split].column_names
-            )
-            for split in self.splits
-        })
+        train_df = self.splits["train"].to_pandas()
 
-        self.logger.info("Tokenización completada.")
-        return self.tokenized_splits
+        if "difficulty" not in train_df.columns:
+            raise ValueError("Column 'difficulty' is required. Compute difficulty buckets before this step.")
+
+        # Create separate subsets
+        easy_df = train_df[train_df["difficulty"] == "easy"].reset_index(drop=True)
+        medium_df = train_df[train_df["difficulty"] == "medium"].reset_index(drop=True)
+        hard_df = train_df[train_df["difficulty"] == "hard"].reset_index(drop=True)
+
+        # Convert back to HF Dataset
+        self.curriculum = {
+            "easy": Dataset.from_pandas(easy_df),
+            "medium": Dataset.from_pandas(medium_df),
+            "hard": Dataset.from_pandas(hard_df),
+            "full": self.splits["train"],  # the original full train split
+        }
+
+        self.logger.info(
+            "Curriculum datasets created:\n"
+            f"  easy:   {len(easy_df)} samples\n"
+            f"  medium: {len(medium_df)} samples\n"
+            f"  hard:   {len(hard_df)} samples\n"
+            f"  full:   {len(train_df)} samples"
+        )
+
+        return self.curriculum
+
 
     # ============================================================
     # ====================== SUMMARY ==============================
@@ -328,26 +369,39 @@ class DataManager:
         self.logger.info(f"Overlap medio: {df['equal_percentage'].mean():.2f}%")
         self.logger.info("================================")
 
+        # Add summary for splits if available
+        if self.splits is not None:
+            self.logger.info("===== RESUMEN DE SPLITS =====")
+            for split_name, split_ds in self.splits.items():
+                split_df = pd.DataFrame(split_ds.select_columns(
+                    ["language", "equal_percentage"]
+                ))
+                self.logger.info(f"--- {split_name.upper()} ---")
+                self.logger.info(f"Muestras: {len(split_df)}")
+                self.logger.info("Muestras por idioma:")
+                self.logger.info(str(split_df["language"].value_counts().to_dict()))
+                self.logger.info(f"Overlap medio: {split_df['equal_percentage'].mean():.2f}%")
+            self.logger.info("================================")
+
 
     # ============================================================
     # ================== PIPELINE COMPLETO =======================
     # ============================================================
 
-    def full_prepare(self):
+    def full_prepare(self, stratify_columns: List[str] = ["language", "difficulty"]):
         """
         Pipeline completo:
         - Carga dataset
         - Overlap
         - Splits
-        - Tokenización
         - Summary
         """
         self.load_main_dataset()
         self.compute_overlap_feature()
-        self.make_splits()
-        self.tokenize_all_splits()
+        self.stratified_split(stratify_by=stratify_columns)
+        self.create_curriculum_datasets()
         self.summary()
 
-        return self.tokenized_splits
+        return self.splits
 
 
