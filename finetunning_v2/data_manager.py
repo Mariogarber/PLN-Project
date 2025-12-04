@@ -344,6 +344,112 @@ class DataManager:
 
         return self.curriculum
 
+    def build_curriculum(
+        self,
+        easy_threshold: float = 70.0,
+        medium_threshold: float = 30.0,
+        min_bucket_size: int = 50,
+        drop_small_buckets: bool = True,
+        regenerate: bool = True,
+    ):
+        """
+        Build curriculum-learning datasets from TRAIN SPLIT only.
+
+        Parameters
+        ----------
+        easy_threshold : float
+            equal_percentage >= easy_threshold → EASY bucket
+        medium_threshold : float
+            equal_percentage between medium_threshold and easy_threshold → MEDIUM bucket
+        min_bucket_size : int
+            discard buckets smaller than this number (optional)
+        drop_small_buckets : bool
+            if True, remove buckets smaller than min_bucket_size
+        regenerate : bool
+            if True, overwrites existing curriculum
+
+        Returns
+        -------
+        dict : {"easy": Dataset, "medium": Dataset, "hard": Dataset, "full": Dataset}
+        """
+
+        if self.splits is None or "train" not in self.splits:
+            raise ValueError("You must run stratified_split() before building curriculum.")
+
+        if not regenerate and hasattr(self, "curriculum"):
+            return self.curriculum
+
+        train_ds = self.splits["train"]
+
+        if "equal_percentage" not in train_ds.column_names:
+            raise ValueError(
+                "equal_percentage not found. You must run compute_overlap_feature() before curriculum."
+            )
+
+        self.logger.info(
+            f"Building curriculum datasets with thresholds: "
+            f"easy >= {easy_threshold}, medium >= {medium_threshold}."
+        )
+
+        # -----------------------
+        # BUILD RAW BUCKETS
+        # -----------------------
+        easy = train_ds.filter(lambda x: x["equal_percentage"] >= easy_threshold)
+        medium = train_ds.filter(
+            lambda x: (x["equal_percentage"] < easy_threshold)
+                      and (x["equal_percentage"] >= medium_threshold)
+        )
+        hard = train_ds.filter(lambda x: x["equal_percentage"] < medium_threshold)
+
+        buckets = {
+            "easy": easy,
+            "medium": medium,
+            "hard": hard,
+        }
+
+        # -----------------------
+        # OPTIONAL FILTERING
+        # -----------------------
+        if drop_small_buckets:
+            for name, ds in list(buckets.items()):
+                if len(ds) < min_bucket_size:
+                    self.logger.warning(
+                        f"Bucket '{name}' has only {len(ds)} samples < {min_bucket_size}. Dropping."
+                    )
+                    del buckets[name]
+
+        # -----------------------
+        # ALWAYS INCLUDE FULL
+        # -----------------------
+        buckets["full"] = train_ds
+
+        # Store
+        self.curriculum = buckets
+
+        # Logging summary
+        self.logger.info("Curriculum buckets created:")
+        for k, ds in self.curriculum.items():
+            self.logger.info(f"  {k}: {len(ds)} samples")
+
+        return self.curriculum
+
+
+    def get_curriculum_splits(self):
+        """
+        Safely returns curriculum splits.
+
+        Returns
+        -------
+        dict: curriculum buckets
+        """
+        if not hasattr(self, "curriculum"):
+            raise ValueError(
+                "Curriculum not generated. Call build_curriculum() first."
+            )
+
+        return self.curriculum
+
+
 
     # ============================================================
     # ====================== SUMMARY ==============================
