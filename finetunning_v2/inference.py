@@ -84,7 +84,10 @@ class DetoxInference:
                 num_beams=num_beams,
                 max_length=max_length,
                 logits_processor=[processor],
-            )
+                repetition_penalty=1.5,
+                bad_words_ids=[[self.tokenizer.unk_token_id]],
+                temperature=0.75
+                )
 
         decoded = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
         return decoded

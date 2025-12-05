@@ -1,0 +1,28 @@
+<html><head><meta charset='utf-8'><title>Detox Evaluation Report</title>
+<style>body{font-family:Arial, sans-serif; margin:20px;} table{border-collapse:collapse; margin-bottom:20px;} th,td{padding:4px 8px;} h1,h2,h3{margin-top:24px;}</style>
+</head><body>
+<h1>Detox Evaluation Report</h1>
+
+            <h2>Global metrics</h2>
+            <table border="1" cellpadding="4" cellspacing="0">
+              <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+              <tbody><tr><td>copy_rate</td><td>0.2500</td></tr><tr><td>bertscore_f1</td><td>0.8546</td></tr><tr><td>sbert_similarity</td><td>0.7572</td></tr><tr><td>bleu</td><td>48.3270</td></tr><tr><td>chrf</td><td>72.2326</td></tr><tr><td>length_ratio</td><td>1.3572</td></tr><tr><td>residual_toxicity</td><td>0.0462</td></tr><tr><td>toxicity_delta</td><td>0.1111</td></tr><tr><td>semantic_drift</td><td>0.8782</td></tr></tbody>
+            </table>
+            
+
+            <h2>Metrics by language</h2>
+            <table border="1" cellpadding="4" cellspacing="0">
+              <thead><tr><th>Group</th><th>copy_rate</th><th>bertscore_f1</th><th>sbert_similarity</th><th>bleu</th><th>chrf</th><th>length_ratio</th><th>residual_toxicity</th><th>toxicity_delta</th><th>semantic_drift</th></tr></thead>
+              <tbody><tr><td>am</td><td>0.2000</td><td>0.9682</td><td>0.8292</td><td>19.4453</td><td>31.4794</td><td>1.3888</td><td>0.0365</td><td>0.0750</td><td>0.9110</td></tr><tr><td>ar</td><td>0.3250</td><td>0.8661</td><td>0.8004</td><td>81.5168</td><td>87.6135</td><td>1.6444</td><td>0.0748</td><td>-0.2000</td><td>0.9049</td></tr><tr><td>de</td><td>0.1000</td><td>0.8437</td><td>0.7600</td><td>82.4237</td><td>90.5065</td><td>1.3314</td><td>0.0200</td><td>0.0500</td><td>0.8240</td></tr><tr><td>en</td><td>0.0500</td><td>0.8191</td><td>0.6699</td><td>14.5358</td><td>27.8434</td><td>1.1714</td><td>0.0421</td><td>0.5750</td><td>0.7834</td></tr><tr><td>es</td><td>0.4000</td><td>0.8338</td><td>0.7630</td><td>17.2860</td><td>34.4450</td><td>1.4021</td><td>0.0313</td><td>0.0750</td><td>0.9063</td></tr><tr><td>hi</td><td>0.1750</td><td>0.8329</td><td>0.7100</td><td>9.9801</td><td>27.1305</td><td>1.1078</td><td>0.0424</td><td>0.2500</td><td>0.8533</td></tr><tr><td>ru</td><td>0.3500</td><td>0.8395</td><td>0.7757</td><td>48.3270</td><td>72.2326</td><td>1.1795</td><td>0.0605</td><td>0.1750</td><td>0.9186</td></tr><tr><td>uk</td><td>0.4250</td><td>0.8547</td><td>0.7917</td><td>56.8110</td><td>68.3875</td><td>1.9890</td><td>0.0954</td><td>0.0250</td><td>0.8638</td></tr><tr><td>zh</td><td>0.2250</td><td>0.8330</td><td>0.7147</td><td>0.0000</td><td>80.2549</td><td>1.0000</td><td>0.0125</td><td>-0.0250</td><td>0.9383</td></tr></tbody>
+            </table>
+            
+<h2>Global Visualizations</h2>
+<h3>Copy rate distribution</h3><img src='modelos/finetune_v2_2/hard_plots\copy_rate.png' width='400'>
+<h3>Length ratio distribution</h3><img src='modelos/finetune_v2_2/hard_plots\length_ratio.png' width='400'>
+<h3>Semantic similarity vs residual toxicity</h3><img src='modelos/finetune_v2_2/hard_plots\semantic_vs_toxicity.png' width='400'>
+<h2>Visualizations by language</h2>
+<h3>copy_rate by language</h3><img src='hard_plots/by_language_copy_rate.png' width='500'>
+<h3>residual_toxicity by language</h3><img src='hard_plots/by_language_residual_toxicity.png' width='500'>
+<h3>toxicity_delta by language</h3><img src='hard_plots/by_language_toxicity_delta.png' width='500'>
+<h3>semantic_drift by language</h3><img src='hard_plots/by_language_semantic_drift.png' width='500'>
+</body></html>
